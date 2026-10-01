@@ -133,12 +133,17 @@ async function connectDrive(clientId) {
 }
 
 function parseFirebaseConfig(text) {
-  let config;
+  let config={};
   const start=text.indexOf('{'); const end=text.lastIndexOf('}');
   const objectText=start >= 0 && end > start ? text.slice(start,end+1) : text.trim();
   const cleaned=objectText.replace(/([,{]\s*)([A-Za-z_$][\w$]*)(\s*:)/g,'$1"$2"$3');
-  try { config=JSON.parse(cleaned); } catch { throw new Error('La configurazione Firebase deve essere un JSON valido.'); }
-  if (!config.apiKey || !config.authDomain || !config.projectId || !config.appId) throw new Error('La configurazione Firebase è incompleta.');
+  try { config=JSON.parse(cleaned); } catch {
+    ['apiKey','authDomain','projectId','storageBucket','messagingSenderId','appId','measurementId'].forEach(key => {
+      const match=objectText.match(new RegExp(`${key}\\s*:\\s*["']([^"']+)["']`));
+      if (match) config[key]=match[1];
+    });
+  }
+  if (!config.apiKey || !config.authDomain || !config.projectId || !config.appId) throw new Error('Configurazione Firebase incompleta: copia tutto il blocco firebaseConfig dalla console.');
   return config;
 }
 async function startFirebase(config) {
