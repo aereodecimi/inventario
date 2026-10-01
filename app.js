@@ -221,7 +221,7 @@ async function productPage(productId) {
   const threshold = await lowStockThreshold();
   if (!product || product.archived) { toast('Prodotto non disponibile.'); navigate('#home'); return; }
   app.innerHTML = `<a class="small" href="#home">← Cerca prodotti</a><div class="card"><div class="row"><div><h1>${esc(product.name)}</h1><p class="muted">${esc(product.brand || 'Marca non indicata')}</p></div><span class="badge">EAN ${esc(product.ean)}</span></div>
-    <dl class="detail"><dt>Disponibili</dt><dd class="quantity">${product.quantity}</dd><dt>Dosaggio</dt><dd>${esc(product.dosage || '—')}</dd><dt>Prezzo pubblico</dt><dd>${money(product.publicPrice)}</dd>${product.notes ? `<dt>Note</dt><dd>${esc(product.notes)}</dd>` : ''}</dl>${product.quantity <= threshold ? `<p class="notice small">Scorta bassa: soglia impostata a ${threshold}.</p>` : ''}</div>
+    <dl class="detail"><dt>Disponibili</dt><dd class="quantity">${product.quantity}</dd><dt>Dosaggio</dt><dd>${esc(product.dosage || '—')}</dd>${product.notes ? `<dt>Note</dt><dd>${esc(product.notes)}</dd>` : ''}</dl>${product.quantity <= threshold ? `<p class="notice small">Scorta bassa: soglia impostata a ${threshold}.</p>` : ''}</div>
     <div class="actions"><button class="button" data-move="sale">Vendita</button><button class="button secondary" data-move="counter_use">Utilizzo banco</button></div>
     <p class="muted small">Ogni operazione registra un movimento e aggiorna la disponibilità.</p>`;
   document.querySelectorAll('[data-move]').forEach(button => button.addEventListener('click', () => movementDialog(product, button.dataset.move)));
