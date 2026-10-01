@@ -34,29 +34,30 @@ Poi visita [http://localhost:8080](http://localhost:8080). Per verificare l’of
 
 Il progetto usa percorsi relativi (`./`), quindi è compatibile anche con il tipico indirizzo `https://utente.github.io/nome-repository/`.
 
-## Sincronizzazione automatica con Google Drive
+## Sincronizzazione automatica con Firebase
 
-La sincronizzazione è privata: l’Admin sceglie il proprio account Google nel consenso di Google. L’app richiede il solo permesso `drive.file`, quindi può gestire i file che crea; crea e aggiorna un backup chiamato `inventario-backup.json` nella cartella privata `Inventario PWA`.
+Firebase salva l’inventario in un database cloud privato e lo aggiorna automaticamente su tutti i dispositivi autorizzati con il tuo account Google. La configurazione Firebase è pubblica per definizione e non concede accesso ai dati: la privacy è garantita dalle regole Firestore e dal login con Google.
 
 ### Configurazione iniziale
 
-1. Apri [Google Cloud Console](https://console.cloud.google.com/) con il tuo account Google e crea un nuovo progetto, ad esempio `Inventario`.
-2. In **API e servizi → Libreria**, cerca e abilita **Google Drive API**.
-3. In **Google Auth platform**, configura la schermata di consenso. Seleziona **External** e, mentre l’app è in test, aggiungi come test user soltanto il tuo indirizzo Gmail.
-4. In **Client**, crea un Client ID OAuth 2.0 di tipo **Web application**.
-5. In **Authorized JavaScript origins**, aggiungi gli indirizzi da cui aprirai l’app, per esempio:
+1. Apri [Firebase Console](https://console.firebase.google.com/) e crea un progetto `Inventario` con il piano gratuito Spark.
+2. Nel progetto, premi l’icona **Web** (`</>`) e registra una nuova app web. Copia l’oggetto `firebaseConfig` proposto da Firebase.
+3. Apri **Build → Authentication → Sign-in method**, abilita **Google** e salva.
+4. Apri **Build → Firestore Database**, crea il database in modalità Production e scegli una regione europea.
+5. In **Firestore Database → Rules**, sostituisci le regole con queste e pubblicale:
 
    ```text
-   http://localhost:8080
-   https://TUO-NOME-UTENTE.github.io
+   rules_version = '2';
+   service cloud.firestore {
+     match /databases/{database}/documents {
+       match /inventories/{userId} {
+         allow read, write: if request.auth != null && request.auth.uid == userId;
+       }
+     }
+   }
    ```
 
-   Il secondo indirizzo non deve includere il nome del repository. Se usi una porta locale diversa, sostituisci `8080` con la tua.
-6. Copia il **Client ID** (termina con `.apps.googleusercontent.com`). Non inserire né creare un client secret nel sito.
-7. Nell’app vai in **Admin → Dati**, incolla il Client ID e premi **Collega Google Drive**. Nel popup scegli esclusivamente il tuo account Google e autorizza l’accesso.
+6. In **Authentication → Settings → Authorized domains**, aggiungi il dominio del sito GitHub Pages, ad esempio `tuo-nome-utente.github.io`.
+7. Apri l’app, vai in **Admin → Dati**, incolla l’intero oggetto `firebaseConfig` e premi **Collega Firebase**. Nel popup scegli il tuo account Google.
 
-Da quel momento ogni modifica a prodotti, movimenti, soglia o importazione CSV aggiorna automaticamente il backup cloud. La prima connessione su un altro dispositivo recupera il backup più recente.
-
-Google rilascia token di accesso temporanei alle app eseguite nel browser. Se l’app resta chiusa a lungo o il token scade, in **Admin → Dati** apparirà “Da ricollegare in questa sessione”: premi **Ricollega Google Drive**. Dopo la riconnessione, le modifiche tornano a essere automatiche.
-
-Non modificare contemporaneamente l’inventario su più dispositivi quando sono offline: il dispositivo con la modifica più recente può sostituire il backup cloud alla sincronizzazione successiva.
+L’account Google viene memorizzato dal browser del dispositivo: dopo il primo collegamento, l’Operatore non deve accedere ogni giorno. Su un nuovo dispositivo l’Admin collega una sola volta il proprio account Google; da allora i dati si sincronizzano in tempo reale. Mantieni comunque un backup JSON periodico.
