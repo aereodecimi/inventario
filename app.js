@@ -20,6 +20,7 @@ let firebaseUser;
 let firebaseUnsubscribe;
 let firebaseSyncTimer;
 let firebaseSyncRunning = false;
+let firebaseCloudRole = '';
 
 const esc = value => String(value ?? '').replace(/[&<>'"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]));
 const money = value => new Intl.NumberFormat('it-IT', {style:'currency', currency:'EUR'}).format(Number(value || 0));
@@ -155,34 +156,85 @@ async function startFirebase(config) {
   }
   return firebaseAppInstance;
 }
-function firebaseDocument() { return firebaseDb.collection('inventories').doc(firebaseUser.uid); }
+async function firebaseInventoryId() { return (await getSetting('firebaseInventoryId')) || firebaseUser.uid; }
+async function firebaseDocument() { return firebaseDb.collection('inventories').doc(await firebaseInventoryId()); }
+function isValidFirebaseUid(uid) { return /^[A-Za-z0-9_-]{6,128}$/.test(uid); }
+async function ensureFirebaseInventory() {
+  const document = await firebaseDocument();
+  const snapshot = await document.get();
+  if (!snapshot.exists) {
+    await document.set({ownerUid:firebaseUser.uid,members:{[firebaseUser.uid]:'owner'}});
+    return {ownerUid:firebaseUser.uid,members:{[firebaseUser.uid]:'owner'}};
+  }
+  const data=snapshot.data();
+  // Migrazione automatica degli inventari creati dalla prima versione dell'app.
+  if (!data.ownerUid) {
+    await document.set({ownerUid:firebaseUser.uid,members:{[firebaseUser.uid]:'owner'}},{merge:true});
+    return {...data,ownerUid:firebaseUser.uid,members:{[firebaseUser.uid]:'owner'}};
+  }
+  return data;
+}
+async function firebaseRole() { const data=await ensureFirebaseInventory(); return data.members?.[firebaseUser.uid] || ''; }
 async function syncFirebaseNow() {
   if (!firebaseUser || firebaseSyncRunning) return;
   firebaseSyncRunning=true;
-  try { const backup=await backupPayload(); await firebaseDocument().set({backup,updatedAt:firebase.firestore.FieldValue.serverTimestamp()}); await putSetting('firebaseLastSyncAt',backup.exportedAt); firebaseStatus(`Sincronizzato nel cloud alle ${dateTime(backup.exportedAt)}.`); }
+  try { const backup=await backupPayload(); await (await firebaseDocument()).set({backup,updatedAt:firebase.firestore.FieldValue.serverTimestamp()},{merge:true}); await putSetting('firebaseLastSyncAt',backup.exportedAt); firebaseStatus(`Sincronizzato nel cloud alle ${dateTime(backup.exportedAt)}.`); }
   catch (error) { firebaseStatus(error.message || 'Sincronizzazione Firebase non riuscita.',true); throw error; }
   finally { firebaseSyncRunning=false; }
 }
 function queueFirebaseSync() { clearTimeout(firebaseSyncTimer); if (!firebaseUser) return; firebaseSyncTimer=setTimeout(()=>syncFirebaseNow().catch(()=>{}),450); }
 async function subscribeFirebase() {
   firebaseUnsubscribe?.();
-  firebaseUnsubscribe=firebaseDocument().onSnapshot(async snapshot => {
+  firebaseUnsubscribe=(await firebaseDocument()).onSnapshot(async snapshot => {
     const remote=snapshot.data()?.backup;
     if (!remote?.exportedAt || Date.parse(remote.exportedAt) <= await latestLocalDate()) return;
     await restoreBackupData(remote); firebaseStatus(`Dati cloud aggiornati (${dateTime(remote.exportedAt)}).`); render();
   }, error => firebaseStatus(error.message || 'Aggiornamento cloud non riuscito.',true));
 }
-async function connectFirebase(configText) {
-  const config=parseFirebaseConfig(configText); await putSetting('firebaseConfig',config);
-  await startFirebase(config); const provider=new firebase.auth.GoogleAuthProvider(); provider.setCustomParameters({prompt:'select_account'});
-  const result=await firebaseAuth.signInWithPopup(provider); firebaseUser=result.user; await putSetting('firebaseEnabled',true); await putSetting('firebaseUserEmail',firebaseUser.email || '');
-  const remote=await firebaseDocument().get(); const backup=remote.data()?.backup;
-  const downloaded=backup?.exportedAt && Date.parse(backup.exportedAt) > await latestLocalDate(); if (downloaded) await restoreBackupData(backup);
+async function activateFirebaseUser(user) {
+  firebaseUser=user; await putSetting('firebaseEnabled',true); await putSetting('firebaseUserEmail',firebaseUser.email || '');
+  if (!await getSetting('firebaseInventoryId')) await putSetting('firebaseInventoryId',firebaseUser.uid);
+  const data=await ensureFirebaseInventory();
+  firebaseCloudRole=data.members?.[firebaseUser.uid] || '';
+  if (!firebaseCloudRole) throw new Error('Questo account non è autorizzato ad aprire l’inventario condiviso.');
+  // Un collaboratore autenticato può gestire l'inventario senza conoscere la password locale dell'Admin.
+  if (firebaseCloudRole === 'editor') isAdmin=true;
+  const backup=data.backup; const downloaded=backup?.exportedAt && Date.parse(backup.exportedAt) > await latestLocalDate();
+  if (downloaded) await restoreBackupData(backup);
   await subscribeFirebase(); await syncFirebaseNow(); return {downloaded,email:firebaseUser.email || ''};
+}
+async function configureFirebase(configText) {
+  const config=parseFirebaseConfig(configText); await putSetting('firebaseConfig',config); await startFirebase(config);
+}
+async function connectFirebaseGoogle(configText) {
+  await configureFirebase(configText); const provider=new firebase.auth.GoogleAuthProvider(); provider.setCustomParameters({prompt:'select_account'});
+  const result=await firebaseAuth.signInWithPopup(provider); return activateFirebaseUser(result.user);
+}
+async function connectFirebaseEmail(configText, email, password, createAccount) {
+  if (!email || !password) throw new Error('Inserisci email e password.');
+  await configureFirebase(configText);
+  const result=createAccount ? await firebaseAuth.createUserWithEmailAndPassword(email,password) : await firebaseAuth.signInWithEmailAndPassword(email,password);
+  return activateFirebaseUser(result.user);
+}
+async function openSharedInventory(inventoryId) {
+  if (!firebaseUser || !isValidFirebaseUid(inventoryId)) throw new Error('Inserisci un ID inventario valido.');
+  const previous=await getSetting('firebaseInventoryId'); await putSetting('firebaseInventoryId',inventoryId);
+  try { return await activateFirebaseUser(firebaseUser); }
+  catch (error) { await putSetting('firebaseInventoryId',previous || firebaseUser.uid); throw error; }
+}
+async function addFirebaseCollaborator(uid) {
+  if (!isValidFirebaseUid(uid)) throw new Error('L’ID collaboratore non è valido.');
+  if (await firebaseRole() !== 'owner') throw new Error('Solo il proprietario può gestire gli accessi.');
+  if (uid === firebaseUser.uid) throw new Error('Questo è già il tuo account proprietario.');
+  await (await firebaseDocument()).update({[`members.${uid}`]:'editor'});
+}
+async function removeFirebaseCollaborator(uid) {
+  if (await firebaseRole() !== 'owner') throw new Error('Solo il proprietario può gestire gli accessi.');
+  await (await firebaseDocument()).update({[`members.${uid}`]:firebase.firestore.FieldValue.delete()});
 }
 async function resumeFirebase() {
   const config=await getSetting('firebaseConfig'); if (!config) return;
-  try { await startFirebase(config); firebaseAuth.onAuthStateChanged(async user => { if (!user) return; firebaseUser=user; await subscribeFirebase(); firebaseStatus(`Cloud collegato: ${user.email || 'account Google'}.`); }); } catch { /* l'app resta disponibile offline */ }
+  try { await startFirebase(config); firebaseAuth.onAuthStateChanged(async user => { if (!user) return; try { await activateFirebaseUser(user); } catch (error) { firebaseStatus(error.message || 'Cloud non disponibile.',true); } }); } catch { /* l'app resta disponibile offline */ }
 }
 
 async function hashPassword(password) {
@@ -325,7 +377,28 @@ async function adminMovements() { const moves=(await allMoves()).sort((a,b)=>b.d
 
 function download(filename, type, content) { const blob = new Blob([content], {type}); const url=URL.createObjectURL(blob); const link=document.createElement('a'); link.href=url; link.download=filename; link.click(); setTimeout(()=>URL.revokeObjectURL(url),500); }
 async function adminDriveData() { /* Integrazione Drive sostituita da Firebase. */ }
-async function adminData() { const threshold=await lowStockThreshold(); const config=await getSetting('firebaseConfig'); const configText=config ? JSON.stringify(config,null,2) : ''; app.innerHTML=`<h1>Area Admin</h1>${adminTabs('data')}<div class="card"><h2>Sincronizzazione Firebase</h2><p class="muted small">I dati sono privati nel tuo account Firebase e si aggiornano automaticamente su tutti i dispositivi autorizzati.</p><label class="field">Configurazione Firebase<textarea id="firebase-config" placeholder='Incolla qui il firebaseConfig ricevuto da Firebase'>${esc(configText)}</textarea></label><div class="actions"><button id="firebase-connect" class="button">${firebaseUser ? 'Ricollega account Google' : 'Collega Firebase'}</button><button id="firebase-sync" class="button secondary" ${firebaseUser ? '' : 'disabled'}>Sincronizza ora</button></div><p id="firebase-status" class="small">${firebaseUser ? `Cloud collegato: ${esc(firebaseUser.email || 'account Google')}.` : (config ? 'Configurato: accedi con il tuo Google per sincronizzare.' : 'Non ancora configurato.')}</p></div><div class="card"><h2>Avvisi scorte basse</h2><form id="threshold-form" class="form-grid"><label class="field">Avvisa quando la quantità è uguale o inferiore a<input name="threshold" type="number" min="0" step="1" value="${threshold}" required></label><button class="button full">Salva soglia</button></form></div><div class="card"><h2>Importa prodotti CSV</h2><p class="muted small">Usa il CSV esportato da questa app. Per gli EAN già presenti, i dati del prodotto vengono aggiornati; lo storico dei movimenti resta invariato.</p><input id="import-file" type="file" accept=".csv,text/csv"><button id="import" class="button full" disabled>Importa prodotti</button><p id="import-result" class="small" aria-live="polite"></p></div><div class="card"><h2>Esporta prodotti CSV</h2><p class="muted small">File compatibile con Excel e fogli di calcolo.</p><button id="csv" class="button full">Scarica CSV</button></div><div class="card"><h2>Backup completo</h2><p class="muted small">Mantieni anche un backup locale periodico.</p><button id="backup" class="button full">Scarica backup JSON</button></div><div class="card"><h2>Ripristina backup</h2><p class="notice small">Il ripristino sostituisce tutti i dati presenti su questo dispositivo.</p><input id="restore-file" type="file" accept="application/json,.json"><button id="restore" class="button danger full" disabled>Ripristina backup</button></div>`; addLogout(); document.querySelector('#firebase-connect').onclick=async()=>{try { const result=await connectFirebase(document.querySelector('#firebase-config').value.trim()); document.querySelector('#firebase-sync').disabled=false; toast(result.downloaded ? 'Dati cloud recuperati.' : 'Firebase collegato e sincronizzato.'); render(); } catch(error) { firebaseStatus(error.message || 'Impossibile collegare Firebase.',true); }}; document.querySelector('#firebase-sync').onclick=()=>syncFirebaseNow().then(()=>toast('Sincronizzazione completata.')).catch(()=>{}); document.querySelector('#threshold-form').onsubmit=saveThreshold; document.querySelector('#csv').onclick=exportCsv; document.querySelector('#backup').onclick=exportBackup; const importFile=document.querySelector('#import-file'); document.querySelector('#import').onclick=()=>importCsv(importFile.files[0]); importFile.onchange=()=>document.querySelector('#import').disabled=!importFile.files.length; const file=document.querySelector('#restore-file'); document.querySelector('#restore').onclick=()=>restoreBackup(file.files[0]); file.onchange=()=>document.querySelector('#restore').disabled=!file.files.length; }
+async function adminData() {
+  const threshold=await lowStockThreshold(); const config=await getSetting('firebaseConfig'); const configText=config ? JSON.stringify(config,null,2) : '';
+  let inventoryId='', role='', members=[];
+  if (firebaseUser) { try { inventoryId=await firebaseInventoryId(); const data=await ensureFirebaseInventory(); role=data.members?.[firebaseUser.uid] || ''; members=Object.entries(data.members || {}).filter(([uid])=>uid!==data.ownerUid); } catch { /* lo stato cloud è già mostrato nella pagina */ } }
+  const accountBox = firebaseUser ? `<p class="small">Account collegato: <strong>${esc(firebaseUser.email || 'senza email')}</strong></p><label class="field">Il tuo ID Firebase (da comunicare al proprietario)<input id="firebase-user-id" readonly value="${esc(firebaseUser.uid)}"></label><button id="copy-user-id" class="button secondary full">Copia il mio ID</button>` : `<div class="two"><label class="field">Email<input id="firebase-email" type="email" autocomplete="email" placeholder="nome@email.it"></label><label class="field">Password<input id="firebase-password" type="password" autocomplete="current-password" placeholder="Almeno 6 caratteri"></label></div><div class="actions"><button id="firebase-email-login" class="button secondary">Accedi con email</button><button id="firebase-email-create" class="button secondary">Crea account email</button></div>`;
+  const sharingBox = !firebaseUser ? '' : role==='owner' ? `<div class="card"><h2>Collaboratori</h2><p class="muted small">Concedi a un collaboratore il permesso di vedere e modificare questo inventario. Prima deve accedere una volta e comunicarti il suo ID Firebase.</p><label class="field">ID dell'account collaboratore<input id="collaborator-id" placeholder="ID copiato dal collaboratore"></label><button id="add-collaborator" class="button full">Aggiungi collaboratore</button>${members.length ? `<ul class="list">${members.map(([uid])=>`<li><div class="row"><span class="small">${esc(uid)}</span><button class="button danger" data-remove-collaborator="${esc(uid)}">Rimuovi</button></div></li>`).join('')}</ul>` : '<p class="muted small">Nessun collaboratore autorizzato.</p>'}<p class="small muted">ID inventario da comunicare al collaboratore: <strong>${esc(inventoryId)}</strong></p></div>` : `<div class="card"><h2>Apri inventario condiviso</h2><p class="muted small">Dopo che il proprietario ha aggiunto il tuo ID, incolla qui il suo ID inventario.</p><label class="field">ID inventario del proprietario<input id="shared-inventory-id" value="${esc(inventoryId)}"></label><button id="open-shared-inventory" class="button full">Apri inventario condiviso</button></div>`;
+  app.innerHTML=`<h1>Area Admin</h1>${adminTabs('data')}<div class="card"><h2>Sincronizzazione Firebase</h2><p class="muted small">I dati sono privati e si aggiornano automaticamente sui dispositivi autorizzati.</p><label class="field">Configurazione Firebase<textarea id="firebase-config" placeholder="Incolla qui il firebaseConfig ricevuto da Firebase">${esc(configText)}</textarea></label><div class="actions"><button id="firebase-google" class="button">Accedi con Google</button><button id="firebase-sync" class="button secondary" ${firebaseUser ? '' : 'disabled'}>Sincronizza ora</button></div>${accountBox}<p id="firebase-status" class="small">${firebaseUser ? `Cloud collegato: ${esc(firebaseUser.email || 'account')}.` : (config ? 'Configurato: accedi con Google oppure email.' : 'Non ancora configurato.')}</p></div>${sharingBox}<div class="card"><h2>Avvisi scorte basse</h2><form id="threshold-form" class="form-grid"><label class="field">Avvisa quando la quantità è uguale o inferiore a<input name="threshold" type="number" min="0" step="1" value="${threshold}" required></label><button class="button full">Salva soglia</button></form></div><div class="card"><h2>Importa prodotti CSV</h2><p class="muted small">Usa il CSV esportato da questa app. Per gli EAN già presenti, i dati del prodotto vengono aggiornati; lo storico dei movimenti resta invariato.</p><input id="import-file" type="file" accept=".csv,text/csv"><button id="import" class="button full" disabled>Importa prodotti</button><p id="import-result" class="small" aria-live="polite"></p></div><div class="card"><h2>Esporta prodotti CSV</h2><p class="muted small">File compatibile con Excel e fogli di calcolo.</p><button id="csv" class="button full">Scarica CSV</button></div><div class="card"><h2>Backup completo</h2><p class="muted small">Mantieni anche un backup locale periodico.</p><button id="backup" class="button full">Scarica backup JSON</button></div><div class="card"><h2>Ripristina backup</h2><p class="notice small">Il ripristino sostituisce tutti i dati presenti su questo dispositivo.</p><input id="restore-file" type="file" accept="application/json,.json"><button id="restore" class="button danger full" disabled>Ripristina backup</button></div>`;
+  addLogout();
+  const configValue=()=>document.querySelector('#firebase-config').value.trim();
+  const complete=async action=>{ try { const result=await action(); document.querySelector('#firebase-sync').disabled=false; toast(result?.downloaded ? 'Dati cloud recuperati.' : 'Firebase collegato e sincronizzato.'); render(); } catch(error) { firebaseStatus(error.message || 'Operazione non riuscita.',true); } };
+  document.querySelector('#firebase-google').onclick=()=>complete(()=>connectFirebaseGoogle(configValue()));
+  document.querySelector('#firebase-email-login')?.addEventListener('click',()=>complete(()=>connectFirebaseEmail(configValue(),document.querySelector('#firebase-email').value.trim(),document.querySelector('#firebase-password').value,false)));
+  document.querySelector('#firebase-email-create')?.addEventListener('click',()=>complete(()=>connectFirebaseEmail(configValue(),document.querySelector('#firebase-email').value.trim(),document.querySelector('#firebase-password').value,true)));
+  document.querySelector('#firebase-sync').onclick=()=>syncFirebaseNow().then(()=>toast('Sincronizzazione completata.')).catch(()=>{});
+  document.querySelector('#copy-user-id')?.addEventListener('click',async()=>{ await navigator.clipboard.writeText(firebaseUser.uid); toast('ID copiato.'); });
+  document.querySelector('#add-collaborator')?.addEventListener('click',async()=>{ try { await addFirebaseCollaborator(document.querySelector('#collaborator-id').value.trim()); toast('Collaboratore aggiunto.'); render(); } catch(error) { toast(error.message || 'Impossibile aggiungere il collaboratore.'); } });
+  document.querySelectorAll('[data-remove-collaborator]').forEach(button=>button.onclick=async()=>{ await removeFirebaseCollaborator(button.dataset.removeCollaborator); toast('Accesso rimosso.'); render(); });
+  document.querySelector('#open-shared-inventory')?.addEventListener('click',()=>complete(()=>openSharedInventory(document.querySelector('#shared-inventory-id').value.trim())));
+  document.querySelector('#threshold-form').onsubmit=saveThreshold; document.querySelector('#csv').onclick=exportCsv; document.querySelector('#backup').onclick=exportBackup;
+  const importFile=document.querySelector('#import-file'); document.querySelector('#import').onclick=()=>importCsv(importFile.files[0]); importFile.onchange=()=>document.querySelector('#import').disabled=!importFile.files.length;
+  const file=document.querySelector('#restore-file'); document.querySelector('#restore').onclick=()=>restoreBackup(file.files[0]); file.onchange=()=>document.querySelector('#restore').disabled=!file.files.length;
+}
 async function saveThreshold(event) { event.preventDefault(); const value=Number(new FormData(event.currentTarget).get('threshold')); if (!Number.isInteger(value) || value < 0) { toast('Inserisci una soglia intera uguale o superiore a zero.'); return; } await putSetting('lowStockThreshold', value); queueFirebaseSync(); toast('Soglia salvata.'); }
 async function exportCsv() { const fields=[['EAN','Nome prodotto','Marca','Prezzo pubblico','Prezzo acquisto','Dosaggio','Quantità','Note','Archiviato']]; (await allProducts()).forEach(p=>fields.push([p.ean,p.name,p.brand,p.publicPrice,p.purchasePrice,p.dosage,p.quantity,p.notes,p.archived?'Sì':'No'])); download(`prodotti-${new Date().toISOString().slice(0,10)}.csv`, 'text/csv;charset=utf-8', '\ufeff'+fields.map(row=>row.map(value=>`"${String(value ?? '').replaceAll('"','""')}"`).join(';')).join('\n')); }
 function parseCsv(text) { const delimiter = (text.split(/\r?\n/, 1)[0].match(/;/g) || []).length >= (text.split(/\r?\n/, 1)[0].match(/,/g) || []).length ? ';' : ','; const rows=[]; let row=[], cell='', quoted=false; for (let index=0; index<text.length; index+=1) { const char=text[index]; if (char==='"') { if (quoted && text[index+1]==='"') { cell+='"'; index+=1; } else quoted=!quoted; } else if (char===delimiter && !quoted) { row.push(cell); cell=''; } else if ((char==='\n' || char==='\r') && !quoted) { if (char==='\r' && text[index+1]==='\n') index+=1; row.push(cell); if (row.some(value=>value.trim())) rows.push(row); row=[]; cell=''; } else cell+=char; } row.push(cell); if (row.some(value=>value.trim())) rows.push(row); return rows; }
