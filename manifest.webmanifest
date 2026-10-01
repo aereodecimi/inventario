@@ -1,0 +1,11 @@
+{
+  "name": "Inventario",
+  "short_name": "Inventario",
+  "description": "Inventario locale per prodotti e movimenti.",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#f7f9f8",
+  "theme_color": "#176b5b",
+  "icons": [{"src":"assets/icon.svg","sizes":"any","type":"image/svg+xml","purpose":"any maskable"}]
+}

@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="it">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#176b5b" />
+    <meta name="description" content="Inventario locale, semplice e utilizzabile offline." />
+    <link rel="manifest" href="manifest.webmanifest" />
+    <link rel="icon" href="assets/icon.svg" type="image/svg+xml" />
+    <link rel="stylesheet" href="styles.css" />
+    <title>Inventario</title>
+  </head>
+  <body>
+    <header class="topbar">
+      <a class="brand" href="#home" aria-label="Torna alla home">INVENTARIO</a>
+      <button id="admin-button" class="text-button" type="button">⚙ Admin</button>
+    </header>
+    <main id="app" class="page" aria-live="polite"></main>
+    <div id="toast" class="toast" role="status"></div>
+    <script src="app.js" defer></script>
+  </body>
+</html>
