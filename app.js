@@ -134,7 +134,8 @@ async function connectDrive(clientId) {
 
 function parseFirebaseConfig(text) {
   let config;
-  try { config=JSON.parse(text); } catch { throw new Error('La configurazione Firebase deve essere un JSON valido.'); }
+  const cleaned=text.trim().replace(/^const\s+firebaseConfig\s*=\s*/,'').replace(/;\s*$/,'');
+  try { config=JSON.parse(cleaned); } catch { throw new Error('La configurazione Firebase deve essere un JSON valido.'); }
   if (!config.apiKey || !config.authDomain || !config.projectId || !config.appId) throw new Error('La configurazione Firebase è incompleta.');
   return config;
 }
