@@ -134,7 +134,9 @@ async function connectDrive(clientId) {
 
 function parseFirebaseConfig(text) {
   let config;
-  const cleaned=text.trim().replace(/^const\s+firebaseConfig\s*=\s*/,'').replace(/;\s*$/,'');
+  const start=text.indexOf('{'); const end=text.lastIndexOf('}');
+  const objectText=start >= 0 && end > start ? text.slice(start,end+1) : text.trim();
+  const cleaned=objectText.replace(/([,{]\s*)([A-Za-z_$][\w$]*)(\s*:)/g,'$1"$2"$3');
   try { config=JSON.parse(cleaned); } catch { throw new Error('La configurazione Firebase deve essere un JSON valido.'); }
   if (!config.apiKey || !config.authDomain || !config.projectId || !config.appId) throw new Error('La configurazione Firebase è incompleta.');
   return config;
